@@ -3,6 +3,7 @@ import type { OpenAIChatCompletionResponse, OpenAIToolCall, OpenAICompletionUsag
 import { logger } from '../util/logger.js';
 import { serverError, rateLimited } from '../util/errors.js';
 import { stripMcpToolPrefix } from '../tools/tool-translator.js';
+import { parseAnyToolCallText } from './function-call-text-parser.js';
 
 interface AccumulatedToolCall {
   id: string;
@@ -17,6 +18,7 @@ interface AccumulatedToolCall {
 export async function collectOpenAIResponse(
   events: AsyncGenerator<CliEvent>,
   reverseToolMap?: Record<string, string>,
+  validToolNames?: string[],
 ): Promise<OpenAIChatCompletionResponse> {
   let messageId = '';
   let model = '';
@@ -94,7 +96,7 @@ export async function collectOpenAIResponse(
       }
 
       case 'rate_limit_event': {
-        if (event.rate_limit_info.status !== 'allowed') {
+        if (event.rate_limit_info.status !== 'allowed' && event.rate_limit_info.status !== 'allowed_warning') {
           throw rateLimited(
             event.rate_limit_info.message || 'Rate limit exceeded',
             event.rate_limit_info.reset,
@@ -109,6 +111,20 @@ export async function collectOpenAIResponse(
 
       default:
         break;
+    }
+  }
+
+  // Fallback: the CLI sometimes emits tool calls as <function_calls> XML text
+  // instead of native tool_use blocks. Recover them so the client gets tool_calls.
+  if (toolCalls.length === 0 && (textContent.includes('<invoke') || (textContent.includes('"name"') && textContent.includes('"input"')))) {
+    const parsed = parseAnyToolCallText(textContent, reverseToolMap, validToolNames);
+    if (parsed) {
+      for (const tc of parsed.toolCalls) {
+        toolCalls.push({ id: tc.id, name: tc.name, partialJson: tc.argsJson });
+      }
+      textContent = parsed.preText;
+      finishReason = 'tool_calls';
+      logger.info('Recovered tool calls from <function_calls> text (non-streaming)', { count: parsed.toolCalls.length });
     }
   }
 

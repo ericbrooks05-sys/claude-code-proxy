@@ -5,7 +5,7 @@ import type { AnthropicMessagesRequest, AnthropicMessage, AnthropicContentBlock,
 import { parseJsonBody, addUnsupportedWarnings } from '../server/middleware.js';
 import { translateAnthropicRequest } from '../translation/anthropic-to-cli.js';
 import { buildArgs } from '../cli/args-builder.js';
-import { spawnCli } from '../cli/subprocess.js';
+import { spawnCliQueued } from '../cli/subprocess.js';
 import { cliToOpenAISSE } from '../translation/cli-to-openai-stream.js';
 import { collectOpenAIResponse } from '../translation/cli-to-openai.js';
 import { mapToolDefinitions } from '../openclaw/tool-map.js';
@@ -146,6 +146,10 @@ export async function handleChatCompletions(
   const { system, anthropicMessages } = convertMessages(body.messages);
   let tools = convertTools(body.tools);
   const toolChoice = convertToolChoice(body.tool_choice);
+  // Original client tool names — used to correct hallucinated names in text-mode tool calls.
+  const validToolNames: string[] = (body.tools ?? [])
+    .map((t) => t?.function?.name)
+    .filter((n): n is string => typeof n === 'string' && n.length > 0);
 
   // Map tool names (e.g. OpenClaw "exec" → "Bash") and build reverse map for responses
   let reverseToolMap: Record<string, string> | undefined;
@@ -203,7 +207,7 @@ export async function handleChatCompletions(
     messageCount: body.messages.length,
   });
 
-  const { events, kill } = spawnCli(args, prompt, config.requestTimeoutMs, extraEnv);
+  const { events, kill } = await spawnCliQueued(args, prompt, config.requestTimeoutMs, extraEnv);
 
   req.on('close', () => {
     logger.debug('Client disconnected, killing CLI process');
@@ -217,10 +221,9 @@ export async function handleChatCompletions(
       'Connection': 'keep-alive',
     });
     // SSE connection confirmation — lets clients know the stream is live
-    res.write(':ok\n\n');
 
     try {
-      for await (const chunk of cliToOpenAISSE(events, reverseToolMap)) {
+      for await (const chunk of cliToOpenAISSE(events, reverseToolMap, validToolNames)) {
         if (!res.writable) break;
         res.write(chunk);
       }
@@ -246,7 +249,7 @@ export async function handleChatCompletions(
     }
   } else {
     try {
-      const result = await collectOpenAIResponse(events, reverseToolMap);
+      const result = await collectOpenAIResponse(events, reverseToolMap, validToolNames);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
     } catch (err) {
