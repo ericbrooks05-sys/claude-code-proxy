@@ -87,5 +87,22 @@ export function mapToolDefinitions(
     return { ...tool, name: mapped };
   });
 
+  // Subagent hallucination guard (2026-06-03). The model has a strong prior to call
+  // its native subagent tools "Agent"/"Task" REGARDLESS of what the client names its
+  // spawner (OpenClaw's main agent calls it "sessions_spawn"). When it does, OpenClaw
+  // rejects "Tool Agent not found" and retries — a wasteful loop. So map those
+  // hallucinated names onto whichever subagent-like tool the request actually provides.
+  // Schema-discovering (works for any spawner name); only adds an alias if that name
+  // isn't already a real/mapped tool, so correct sessions_spawn calls are untouched.
+  const SUBAGENT_RE = /^(sessions_spawn|spawn|subagent|agent|task|run_agent|delegate)$/i;
+  const spawner = tools.find(t => SUBAGENT_RE.test(t.name));
+  if (spawner) {
+    for (const alias of ['Agent', 'Task']) {
+      if (!(alias in reverseToolMap) && !seenNames.has(alias)) {
+        reverseToolMap[alias] = spawner.name;
+      }
+    }
+  }
+
   return { mappedTools, reverseToolMap };
 }
