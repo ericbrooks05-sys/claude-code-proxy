@@ -4,6 +4,17 @@ import { logger } from '../util/logger.js';
 import { serverError, rateLimited } from '../util/errors.js';
 import { stripMcpToolPrefix } from '../tools/tool-translator.js';
 import { parseAnyToolCallText } from './function-call-text-parser.js';
+import { remapToolInput } from '../openclaw/tool-map.js';
+
+/** Reverse-map Claude-native param keys (e.g. file_path) to OpenClaw's (path) in an args JSON string. */
+function remapArgsJson(argsJson: string): string {
+  if (!argsJson) return argsJson;
+  try {
+    return JSON.stringify(remapToolInput(JSON.parse(argsJson)));
+  } catch {
+    return argsJson; // partial/invalid JSON — leave untouched
+  }
+}
 
 interface AccumulatedToolCall {
   id: string;
@@ -136,7 +147,7 @@ export async function collectOpenAIResponse(
           type: 'function' as const,
           function: {
             name: tc.name,
-            arguments: tc.partialJson,
+            arguments: remapArgsJson(tc.partialJson),
           },
         }))
       : undefined;

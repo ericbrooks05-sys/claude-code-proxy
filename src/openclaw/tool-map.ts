@@ -12,6 +12,14 @@
 import type { AnthropicToolDefinition } from '../protocol/anthropic-types.js';
 import { logger } from '../util/logger.js';
 
+// OpenClaw tool name -> Claude-native name. The model has strong priors for the
+// Claude-native names AND their native parameter names/casing, and uses them even
+// when sent a differently-named tool/schema (verified 2026-06-03: a tool named
+// "write" with a "path" param still came back as Write(file_path=...)). So the
+// mapping is necessary, but the RESPONSE side must translate both the name (via
+// reverseToolMap) AND the parameter keys (via CLAUDE_PARAM_TO_OPENCLAW) back.
+// "agent" was previously missing -> the model's "Agent" call hit no reverse entry
+// -> "Tool Agent not found" -> OpenClaw's uncapped retry looped and burned quota.
 const OPENCLAW_TO_CLAUDE: Record<string, string> = {
   exec: 'Bash',
   read: 'Read',
@@ -21,7 +29,29 @@ const OPENCLAW_TO_CLAUDE: Record<string, string> = {
   web_fetch: 'WebFetch',
   browser: 'Browser',
   canvas: 'Canvas',
+  agent: 'Agent',
 };
+
+// Claude-native parameter key -> OpenClaw parameter key. The model emits its native
+// param names (e.g. Write/Read/Edit use "file_path") regardless of the schema we
+// send; OpenClaw's file tools expect "path". Applied to response tool_use input.
+const CLAUDE_PARAM_TO_OPENCLAW: Record<string, string> = {
+  file_path: 'path',
+};
+
+/**
+ * Translate a response tool_use input object's parameter keys from Claude-native
+ * names back to the names the OpenClaw client expects. Safe to call on any input:
+ * only known aliased keys are renamed; everything else passes through untouched.
+ */
+export function remapToolInput(input: unknown): unknown {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
+    out[CLAUDE_PARAM_TO_OPENCLAW[k] ?? k] = v;
+  }
+  return out;
+}
 
 /**
  * Map an OpenClaw tool name to its Claude Code equivalent.

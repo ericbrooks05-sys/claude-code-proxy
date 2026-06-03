@@ -3,6 +3,17 @@ import type { OpenAIChatCompletionChunk } from '../protocol/openai-types.js';
 import { logger } from '../util/logger.js';
 import { stripMcpToolPrefix } from '../tools/tool-translator.js';
 import { parseAnyToolCallText } from './function-call-text-parser.js';
+import { remapToolInput } from '../openclaw/tool-map.js';
+
+/** Reverse-map Claude-native param keys (e.g. file_path) to OpenClaw's (path) in an args JSON string. */
+function remapArgsJson(argsJson: string): string {
+  if (!argsJson) return argsJson;
+  try {
+    return JSON.stringify(remapToolInput(JSON.parse(argsJson)));
+  } catch {
+    return argsJson;
+  }
+}
 
 function makeChunk(
   id: string,
@@ -34,6 +45,10 @@ export async function* cliToOpenAISSE(
   let toolCallIndex = -1;
   let sentRole = false;
   let sawToolUseStop = false;
+  // Buffer the current tool_use block's streamed input JSON so we can rename
+  // Claude-native param keys (file_path -> path) before emitting. Renaming can't be
+  // done on partial JSON fragments, so we hold the args and flush them at block stop.
+  let pendingToolArgs: string | null = null;
   // Buffer assistant text so we can detect <function_calls> XML that the CLI
   // sometimes emits as text instead of native tool_use, and convert it.
   let textBuffer = '';
@@ -85,6 +100,7 @@ export async function* cliToOpenAISSE(
         _diag.blocks.push(`${block.type}@${inner.index}`);
         if (block.type === 'tool_use') {
           toolCallIndex++;
+          pendingToolArgs = ''; // start buffering this block's input JSON
           const chunk = makeChunk(messageId, model, {
             tool_calls: [{
               index: toolCallIndex,
@@ -109,19 +125,23 @@ export async function* cliToOpenAISSE(
           _diag.thinkingDeltas++;
         } else if (inner.delta.type === 'input_json_delta') {
           _diag.toolChunks++;
-          const chunk = makeChunk(messageId, model, {
-            tool_calls: [{
-              index: toolCallIndex,
-              function: { arguments: inner.delta.partial_json },
-            }],
-          }, null);
-          yield `data: ${JSON.stringify(chunk)}\n\n`;
+          // Buffer instead of emitting live — flushed (remapped) at content_block_stop.
+          if (pendingToolArgs !== null) {
+            pendingToolArgs += inner.delta.partial_json;
+          }
         }
         // Skip thinking_delta and signature_delta for OpenAI
         break;
       }
 
       case 'message_delta': {
+        // Safety net: flush any tool args not yet closed by a content_block_stop.
+        if (pendingToolArgs !== null) {
+          yield `data: ${JSON.stringify(makeChunk(messageId, model, {
+            tool_calls: [{ index: toolCallIndex, function: { arguments: remapArgsJson(pendingToolArgs) } }],
+          }, null))}\n\n`;
+          pendingToolArgs = null;
+        }
         let finishReason: 'stop' | 'tool_calls' | 'length' = 'stop';
         if (inner.delta.stop_reason === 'tool_use') {
           finishReason = 'tool_calls';
@@ -140,7 +160,7 @@ export async function* cliToOpenAISSE(
             for (const tc of parsed.toolCalls) {
               _diag.toolChunks++;
               yield `data: ${JSON.stringify(makeChunk(messageId, model, {
-                tool_calls: [{ index: ti, id: tc.id, type: 'function', function: { name: tc.name, arguments: tc.argsJson } }],
+                tool_calls: [{ index: ti, id: tc.id, type: 'function', function: { name: tc.name, arguments: remapArgsJson(tc.argsJson) } }],
               }, null))}\n\n`;
               ti++;
             }
@@ -182,6 +202,13 @@ export async function* cliToOpenAISSE(
       }
 
       case 'content_block_stop':
+        // Flush the buffered tool args with param keys remapped (file_path -> path).
+        if (pendingToolArgs !== null) {
+          yield `data: ${JSON.stringify(makeChunk(messageId, model, {
+            tool_calls: [{ index: toolCallIndex, function: { arguments: remapArgsJson(pendingToolArgs) } }],
+          }, null))}\n\n`;
+          pendingToolArgs = null;
+        }
         break;
 
       default:
