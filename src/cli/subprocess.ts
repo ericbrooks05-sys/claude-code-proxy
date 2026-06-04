@@ -9,6 +9,46 @@ export interface SubprocessResult {
   process: ChildProcess;
 }
 
+// FIFO queue — serialize CLI spawns to prevent OAuth token rotation conflicts
+let queueTail: Promise<void> = Promise.resolve();
+
+/**
+ * Queued wrapper around spawnCli. Only one claude process runs at a time.
+ * Requests queue in FIFO order and wait for the previous to exit.
+ */
+export async function spawnCliQueued(
+  args: string[],
+  prompt: string,
+  timeoutMs: number,
+  extraEnv?: Record<string, string>,
+): Promise<SubprocessResult> {
+  const previousDone = queueTail;
+  let releaseSlot!: () => void;
+  queueTail = new Promise<void>((resolve) => {
+    releaseSlot = resolve;
+  });
+
+  await previousDone;
+  logger.debug('Queue slot acquired, spawning CLI');
+
+  const result = spawnCli(args, prompt, timeoutMs, extraEnv);
+
+  // Release slot when process exits (idempotent)
+  let released = false;
+  const release = (): void => {
+    if (!released) {
+      released = true;
+      releaseSlot();
+    }
+  };
+  result.process.on('exit', release);
+  result.process.on('error', release);
+  // Safety net: release after timeout + grace period even if process hangs
+  setTimeout(release, timeoutMs + 15000);
+
+  return result;
+}
+
 export function spawnCli(args: string[], prompt: string, timeoutMs: number, extraEnv?: Record<string, string>): SubprocessResult {
   const command = args[0];
   const spawnArgs = args.slice(1);
