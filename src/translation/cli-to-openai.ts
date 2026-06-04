@@ -3,6 +3,18 @@ import type { OpenAIChatCompletionResponse, OpenAIToolCall, OpenAICompletionUsag
 import { logger } from '../util/logger.js';
 import { serverError, rateLimited } from '../util/errors.js';
 import { stripMcpToolPrefix } from '../tools/tool-translator.js';
+import { parseAnyToolCallText } from './function-call-text-parser.js';
+import { remapToolInput } from '../openclaw/tool-map.js';
+
+/** Reverse-map Claude-native param keys (e.g. file_path) to OpenClaw's (path) in an args JSON string. */
+function remapArgsJson(argsJson: string): string {
+  if (!argsJson) return argsJson;
+  try {
+    return JSON.stringify(remapToolInput(JSON.parse(argsJson)));
+  } catch {
+    return argsJson; // partial/invalid JSON — leave untouched
+  }
+}
 
 interface AccumulatedToolCall {
   id: string;
@@ -72,6 +84,7 @@ export interface OpenAICollectResult {
 export async function collectOpenAIResponse(
   events: AsyncGenerator<CliEvent>,
   reverseToolMap?: Record<string, string>,
+  validToolNames?: string[],
 ): Promise<OpenAICollectResult> {
   let messageId = '';
   let model = '';
@@ -144,7 +157,7 @@ export async function collectOpenAIResponse(
       }
 
       case 'rate_limit_event': {
-        if (event.rate_limit_info.status !== 'allowed') {
+        if (event.rate_limit_info.status !== 'allowed' && event.rate_limit_info.status !== 'allowed_warning') {
           throw rateLimited(
             event.rate_limit_info.message || 'Rate limit exceeded',
             event.rate_limit_info.reset,
@@ -167,6 +180,20 @@ export async function collectOpenAIResponse(
     }
   }
 
+  // Fallback: the CLI sometimes emits tool calls as <function_calls> XML text
+  // instead of native tool_use blocks. Recover them so the client gets tool_calls.
+  if (toolCalls.length === 0 && (textContent.includes('<invoke') || (textContent.includes('"name"') && textContent.includes('"input"')))) {
+    const parsed = parseAnyToolCallText(textContent, reverseToolMap, validToolNames);
+    if (parsed) {
+      for (const tc of parsed.toolCalls) {
+        toolCalls.push({ id: tc.id, name: tc.name, partialJson: tc.argsJson });
+      }
+      textContent = parsed.preText;
+      finishReason = 'tool_calls';
+      logger.info('Recovered tool calls from <function_calls> text (non-streaming)', { count: parsed.toolCalls.length });
+    }
+  }
+
   // Build OpenAI tool calls from accumulated data
   const openaiToolCalls: OpenAIToolCall[] | undefined =
     toolCalls.length > 0
@@ -175,7 +202,7 @@ export async function collectOpenAIResponse(
           type: 'function' as const,
           function: {
             name: tc.name,
-            arguments: tc.partialJson,
+            arguments: remapArgsJson(tc.partialJson),
           },
         }))
       : undefined;

@@ -4,9 +4,10 @@ import type { AnthropicMessagesRequest } from '../protocol/anthropic-types.js';
 import { parseJsonBody, addUnsupportedWarnings, setRateLimitHeaders } from '../server/middleware.js';
 import { translateAnthropicRequest } from '../translation/anthropic-to-cli.js';
 import { buildArgs } from '../cli/args-builder.js';
-import { spawnCli } from '../cli/subprocess.js';
+import { spawnCliQueued } from '../cli/subprocess.js';
 import { cliToAnthropicSSE } from '../translation/cli-to-anthropic-stream.js';
 import { collectAnthropicResponse } from '../translation/cli-to-anthropic.js';
+import { mapToolDefinitions } from '../openclaw/tool-map.js';
 import { badRequest } from '../util/errors.js';
 import { logger } from '../util/logger.js';
 
@@ -43,6 +44,24 @@ export async function handleMessages(
   const enableThinking = config.enableThinking ||
     (typeof betaHeader === 'string' && betaHeader.includes('thinking'));
 
+  // Map tool names (e.g. OpenClaw "exec" → "Bash") and build the reverse map so
+  // response tool_use blocks are translated back to the client's names. Mirrors the
+  // OpenAI route. The forward+reverse pair is symmetric, so this is transparent for
+  // native Anthropic clients (a tool named "write" is sent as "Write" and reverse-
+  // mapped back to "write"); it only changes behavior for OpenClaw-named tools.
+  // NOTE: unlike the OpenAI route we do NOT remap param keys (file_path→path) here —
+  // that remap is OpenClaw-specific and asymmetric, so it must not touch this dual-use
+  // route. Name mapping alone closes the "Tool X not found" loop on /v1/messages.
+  let reverseToolMap: Record<string, string> | undefined;
+  if (body.tools && body.tools.length > 0) {
+    const { mappedTools, reverseToolMap: rmap } = mapToolDefinitions(body.tools);
+    body.tools = mappedTools;
+    if (Object.keys(rmap).length > 0) {
+      reverseToolMap = rmap;
+      logger.debug('Tool name mapping applied (anthropic route)', { reverseToolMap });
+    }
+  }
+
   // Translate request to CLI args
   const cliArgs = translateAnthropicRequest(body);
   cliArgs.enableThinking = enableThinking;
@@ -55,7 +74,7 @@ export async function handleMessages(
     messageCount: body.messages.length,
   });
 
-  const { events, kill } = spawnCli(args, prompt, config.requestTimeoutMs, extraEnv);
+  const { events, kill } = await spawnCliQueued(args, prompt, config.requestTimeoutMs, extraEnv);
 
   // Kill subprocess on client disconnect
   req.on('close', () => {
@@ -71,7 +90,7 @@ export async function handleMessages(
     });
 
     try {
-      for await (const chunk of cliToAnthropicSSE(events, enableThinking)) {
+      for await (const chunk of cliToAnthropicSSE(events, enableThinking, reverseToolMap)) {
         if (!res.writable) break;
         res.write(chunk);
       }
@@ -96,7 +115,7 @@ export async function handleMessages(
     }
   } else {
     try {
-      const { response, rateLimitInfo } = await collectAnthropicResponse(events, enableThinking);
+      const { response, rateLimitInfo } = await collectAnthropicResponse(events, enableThinking, reverseToolMap);
       if (rateLimitInfo) setRateLimitHeaders(res, rateLimitInfo);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(response));

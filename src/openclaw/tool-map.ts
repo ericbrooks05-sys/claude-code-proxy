@@ -12,6 +12,14 @@
 import type { AnthropicToolDefinition } from '../protocol/anthropic-types.js';
 import { logger } from '../util/logger.js';
 
+// OpenClaw tool name -> Claude-native name. The model has strong priors for the
+// Claude-native names AND their native parameter names/casing, and uses them even
+// when sent a differently-named tool/schema (verified 2026-06-03: a tool named
+// "write" with a "path" param still came back as Write(file_path=...)). So the
+// mapping is necessary, but the RESPONSE side must translate both the name (via
+// reverseToolMap) AND the parameter keys (via CLAUDE_PARAM_TO_OPENCLAW) back.
+// "agent" was previously missing -> the model's "Agent" call hit no reverse entry
+// -> "Tool Agent not found" -> OpenClaw's uncapped retry looped and burned quota.
 const OPENCLAW_TO_CLAUDE: Record<string, string> = {
   exec: 'Bash',
   read: 'Read',
@@ -21,7 +29,29 @@ const OPENCLAW_TO_CLAUDE: Record<string, string> = {
   web_fetch: 'WebFetch',
   browser: 'Browser',
   canvas: 'Canvas',
+  agent: 'Agent',
 };
+
+// Claude-native parameter key -> OpenClaw parameter key. The model emits its native
+// param names (e.g. Write/Read/Edit use "file_path") regardless of the schema we
+// send; OpenClaw's file tools expect "path". Applied to response tool_use input.
+const CLAUDE_PARAM_TO_OPENCLAW: Record<string, string> = {
+  file_path: 'path',
+};
+
+/**
+ * Translate a response tool_use input object's parameter keys from Claude-native
+ * names back to the names the OpenClaw client expects. Safe to call on any input:
+ * only known aliased keys are renamed; everything else passes through untouched.
+ */
+export function remapToolInput(input: unknown): unknown {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
+    out[CLAUDE_PARAM_TO_OPENCLAW[k] ?? k] = v;
+  }
+  return out;
+}
 
 /**
  * Map an OpenClaw tool name to its Claude Code equivalent.
@@ -56,6 +86,30 @@ export function mapToolDefinitions(
     }
     return { ...tool, name: mapped };
   });
+
+  // Native-name hallucination guard (2026-06-03). The model has strong priors to call
+  // its Claude Code native tools ("Skill", "Agent"/"Task", "TodoWrite", "WebFetch"...)
+  // REGARDLESS of what OpenClaw names them ("skills", "sessions_spawn", "update_plan",
+  // "web_fetch"...). Each wrong guess costs a wasted round ("Tool X not found" -> retry),
+  // so Pepper would cycle through several names before landing the right one. Map each
+  // well-known native name onto whichever matching tool the request ACTUALLY provides —
+  // schema-discovering, and only when a target is present, so real calls are untouched.
+  const NATIVE_ALIASES: Array<[string, RegExp]> = [
+    ['Agent',     /^(sessions_spawn|spawn|subagents?|run_agent|delegate)$/i],
+    ['Task',      /^(sessions_spawn|spawn|subagents?|run_agent|delegate)$/i],
+    ['Skill',     /^(skills?|run_skill|invoke_skill|use_skill)$/i],
+    ['TodoWrite', /^(update_plan|todo_write|todos?|plan)$/i],
+    ['WebFetch',  /^(web_fetch|fetch_url|fetch)$/i],
+    ['WebSearch', /^(web_search|x_search|search_web)$/i],
+    ['Bash',      /^(exec|bash|shell|run_command)$/i],
+    ['Glob',      /^(glob|find_files|list_files)$/i],
+    ['Grep',      /^(grep|ripgrep|search_files|search_code)$/i],
+  ];
+  for (const [native, re] of NATIVE_ALIASES) {
+    if (native in reverseToolMap || seenNames.has(native)) continue; // already mapped / a real tool
+    const target = tools.find(t => re.test(t.name));
+    if (target) reverseToolMap[native] = target.name;
+  }
 
   return { mappedTools, reverseToolMap };
 }

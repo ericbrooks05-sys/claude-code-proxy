@@ -19,6 +19,8 @@ export interface CliArgs {
   mcpServerNames?: string[];
   /** Whether to enable thinking */
   enableThinking: boolean;
+  /** Whether the prompt contains image content (use stream-json input format) */
+  hasImages?: boolean;
 }
 
 export interface BuiltCliCommand {
@@ -40,6 +42,11 @@ export function buildArgs(cliArgs: CliArgs, config: Config): BuiltCliCommand {
     '--no-session-persistence',
     '--model', cliModel,
   ];
+
+  // Use stream-json input format for image-bearing requests (native vision support)
+  if (cliArgs.hasImages) {
+    args.push('--input-format', 'stream-json');
+  }
 
   // Effort level (validate and omit for haiku)
   const effort = validateEffort(cliModel, cliArgs.effort, config.defaultEffort);
@@ -87,8 +94,20 @@ export function buildArgs(cliArgs: CliArgs, config: Config): BuiltCliCommand {
   args.push('--strict-mcp-config');
   args.push('--mcp-config', JSON.stringify({ mcpServers }));
 
-  // Disable built-in tools (user-defined MCP tools still work)
-  args.push('--tools', '');
+  // Allow the loaded MCP bridge/registry tools so the model invokes them NATIVELY.
+  // NOTE: newer Claude CLI treats `--tools ''` as "no tools at all" (it also blocks
+  // MCP tools), which forces the model to improvise text-format tool calls with
+  // hallucinated names. Explicitly allow-list the MCP servers instead; built-in
+  // tools are excluded because they're not in the allow-list.
+  const mcpServerNamesLoaded = Object.keys(mcpServers);
+  if (mcpServerNamesLoaded.length > 0) {
+    args.push('--allowedTools', ...mcpServerNamesLoaded.map((s) => `mcp__${s}__*`));
+    // Deny the CLI's built-in deferred-tool-search so the model uses the real
+    // client tools directly instead of "searching" (which clients can't fulfill).
+    args.push('--disallowedTools', 'ToolSearch');
+  } else {
+    args.push('--tools', '');
+  }
 
   // JSON schema for structured output
   if (cliArgs.jsonSchema) {
