@@ -4,10 +4,14 @@ import { logger } from '../util/logger.js';
 const MODEL_ALIASES: Record<string, string> = {
   // Opus aliases
   'claude-opus-4-6': 'opus',
+  'claude-opus-4-7': 'opus',
+  'claude-opus-4-8': 'opus',
   'claude-opus-4': 'opus',
   'opus': 'opus',
   'opus-4': 'opus',
   'opus-4-6': 'opus',
+  'opus-4-7': 'opus',
+  'opus-4-8': 'opus',
   // Sonnet aliases
   'claude-sonnet-4-6': 'sonnet',
   'claude-sonnet-4': 'sonnet',
@@ -30,7 +34,7 @@ const STRIP_PREFIXES = ['claude-code-cli/', 'openai/'];
 
 // Map CLI model names back to full Anthropic model IDs for responses
 const CLI_TO_API_MODEL: Record<string, string> = {
-  'opus': 'claude-opus-4-6',
+  'opus': 'claude-opus-4-8',
   'sonnet': 'claude-sonnet-4-6',
   'haiku': 'claude-haiku-4-5',
 };
@@ -100,7 +104,7 @@ export function validateEffort(model: string, effort: string | undefined, defaul
 
 export function getAllModels(): Array<{ id: string; owned_by: string }> {
   return [
-    { id: 'claude-opus-4-6', owned_by: 'anthropic' },
+    { id: 'claude-opus-4-8', owned_by: 'anthropic' },
     { id: 'claude-sonnet-4-6', owned_by: 'anthropic' },
     { id: 'claude-haiku-4-5', owned_by: 'anthropic' },
   ];
