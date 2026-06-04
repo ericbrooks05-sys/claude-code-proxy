@@ -1,5 +1,5 @@
 import type { CliEvent } from '../protocol/cli-types.js';
-import type { OpenAIChatCompletionChunk } from '../protocol/openai-types.js';
+import type { OpenAIChatCompletionChunk, OpenAICompletionUsage } from '../protocol/openai-types.js';
 import { logger } from '../util/logger.js';
 import { stripMcpToolPrefix } from '../tools/tool-translator.js';
 import { parseAnyToolCallText } from './function-call-text-parser.js';
@@ -14,6 +14,7 @@ function remapArgsJson(argsJson: string): string {
     return argsJson;
   }
 }
+import { makeEmptyUsage, updateUsageFromEvent } from './cli-to-openai.js';
 
 function makeChunk(
   id: string,
@@ -31,14 +32,35 @@ function makeChunk(
   };
 }
 
+function makeUsageChunk(
+  id: string,
+  model: string,
+  usage: OpenAICompletionUsage,
+): OpenAIChatCompletionChunk {
+  return {
+    id,
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [],
+    system_fingerprint: null,
+    usage,
+  };
+}
+
 /**
  * Transform CLI events into OpenAI SSE text chunks.
  * @param reverseToolMap - Optional map to translate CLI tool names back to client names
+ * @param includeUsage   - When true, emit a final chunk with empty `choices` and a populated
+ *                         `usage` object before `[DONE]`, per the OpenAI streaming contract for
+ *                         `stream_options.include_usage: true`. The chunk is suppressed on
+ *                         rate-limit errors, since those terminate the stream with an error event.
  */
 export async function* cliToOpenAISSE(
   events: AsyncGenerator<CliEvent>,
   reverseToolMap?: Record<string, string>,
   validToolNames?: string[],
+  includeUsage = false,
 ): AsyncGenerator<string> {
   let messageId = '';
   let model = '';
@@ -54,8 +76,11 @@ export async function* cliToOpenAISSE(
   let textBuffer = '';
   // TEMP DIAGNOSTIC: track stream shape for empty-payload investigation
   const _diag = { textChunks: 0, toolChunks: 0, thinkingDeltas: 0, otherDeltas: 0, blocks: [] as string[], finishReason: '' as string, ranToCompletion: false };
+  const usage: OpenAICompletionUsage = makeEmptyUsage();
 
   for await (const event of events) {
+    updateUsageFromEvent(usage, event);
+
     if (event.type !== 'stream_event') {
       if (event.type === 'system') {
         model = event.model;
@@ -195,6 +220,9 @@ export async function* cliToOpenAISSE(
         if (sawToolUseStop) {
           logger.debug('Stopping stream after tool_use turn (intercepting MCP placeholder turn)');
           logger.info('STREAM_DIAG (tool_use exit)', _diag);
+          if (includeUsage) {
+            yield `data: ${JSON.stringify(makeUsageChunk(messageId, model, usage))}\n\n`;
+          }
           yield 'data: [DONE]\n\n';
           return;
         }
@@ -218,5 +246,8 @@ export async function* cliToOpenAISSE(
 
   _diag.ranToCompletion = true;
   logger.info('STREAM_DIAG', _diag);
+  if (includeUsage) {
+    yield `data: ${JSON.stringify(makeUsageChunk(messageId, model, usage))}\n\n`;
+  }
   yield 'data: [DONE]\n\n';
 }

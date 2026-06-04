@@ -67,6 +67,10 @@ export interface OpenAIResponseFormat {
   };
 }
 
+export interface OpenAIStreamOptions {
+  include_usage?: boolean;
+}
+
 export interface OpenAIChatCompletionRequest {
   model: string;
   messages: OpenAIChatMessage[];
@@ -76,6 +80,7 @@ export interface OpenAIChatCompletionRequest {
   top_p?: number;
   n?: number;
   stream?: boolean;
+  stream_options?: OpenAIStreamOptions;
   stop?: string | string[];
   frequency_penalty?: number;
   presence_penalty?: number;
@@ -96,10 +101,20 @@ export interface OpenAIChoice {
   finish_reason: 'stop' | 'tool_calls' | 'length' | 'content_filter' | null;
 }
 
+export interface OpenAIPromptTokensDetails {
+  cached_tokens: number;
+}
+
 export interface OpenAICompletionUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** Tokens written to the prompt cache (Anthropic-style). Optional. */
+  cache_creation_input_tokens?: number;
+  /** Tokens served from the prompt cache (Anthropic-style). Optional. */
+  cache_read_input_tokens?: number;
+  /** OpenAI-shaped cache detail. `cached_tokens` mirrors `cache_read_input_tokens`. */
+  prompt_tokens_details?: OpenAIPromptTokensDetails;
 }
 
 export interface OpenAIChatCompletionResponse {
@@ -141,6 +156,8 @@ export interface OpenAIChatCompletionChunk {
   model: string;
   choices: OpenAIStreamChoice[];
   system_fingerprint: string | null;
+  /** Populated only on the optional final chunk when stream_options.include_usage is true. */
+  usage?: OpenAICompletionUsage;
 }
 
 // ── Models endpoint ──

@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Config } from '../config.js';
 import type { AnthropicMessagesRequest } from '../protocol/anthropic-types.js';
-import { parseJsonBody, addUnsupportedWarnings } from '../server/middleware.js';
+import { parseJsonBody, addUnsupportedWarnings, setRateLimitHeaders } from '../server/middleware.js';
 import { translateAnthropicRequest } from '../translation/anthropic-to-cli.js';
 import { buildArgs } from '../cli/args-builder.js';
 import { spawnCliQueued } from '../cli/subprocess.js';
@@ -115,9 +115,10 @@ export async function handleMessages(
     }
   } else {
     try {
-      const result = await collectAnthropicResponse(events, enableThinking, reverseToolMap);
+      const { response, rateLimitInfo } = await collectAnthropicResponse(events, enableThinking, reverseToolMap);
+      if (rateLimitInfo) setRateLimitHeaders(res, rateLimitInfo);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(result));
+      res.end(JSON.stringify(response));
     } catch (err) {
       kill();
       throw err;

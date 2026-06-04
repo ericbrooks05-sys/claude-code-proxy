@@ -105,7 +105,7 @@ src/
 - `src/translation/anthropic-to-cli.ts` — `messagesToPrompt()` flattens the messages array into a single string. Multi-turn uses `<assistant_response>` and `<tool_result>` XML tags.
 
 ### "I need to add/change a model"
-- `src/translation/model-map.ts` — `MODEL_ALIASES` maps all accepted names to CLI model names. `EFFORT_BY_MODEL` defines effort constraints per model. `CLI_TO_API_MODEL` maps back for responses.
+- `src/translation/model-map.ts` — model names resolve by family prefix (`opus`, `sonnet`, `haiku`) after stripping known wrappers like `claude-code-cli/` and `openai/`. `EFFORT_BY_MODEL` defines effort constraints per family.
 
 ### "I need to change how responses are translated"
 - Anthropic streaming: `src/translation/cli-to-anthropic-stream.ts` — near pass-through of CLI `stream_event` inner events
@@ -143,7 +143,7 @@ src/
 | `PROXY_API_KEYS` | *(none)* | Comma-separated bearer tokens |
 | `REQUIRE_AUTH` | `true` | Set `false` to disable auth |
 | `CLAUDE_PATH` | `claude` | Path to Claude CLI binary |
-| `DEFAULT_MODEL` | `sonnet` | Fallback model |
+| `DEFAULT_MODEL` | `sonnet` | Reserved default model setting; unknown request models now return 400 |
 | `DEFAULT_EFFORT` | `high` | Default effort level |
 | `REQUEST_TIMEOUT_MS` | `300000` | Per-request timeout (5 min) |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
@@ -204,15 +204,15 @@ Registry server tools arrive with `mcp__<server>__` prefix (e.g., `mcp__neon__qu
 
 ## Model Names
 
-Any of these are accepted in the `model` field:
+Accepted model names resolve by family prefix. The proxy strips `claude-code-cli/` and `openai/`, then matches `opus`, `sonnet`, or `haiku` with any optional suffix.
 
-| Aliases | CLI Model | Response Model ID |
+| Examples Accepted | CLI Model | `/v1/models` ID |
 |---|---|---|
-| `claude-opus-4-6`, `claude-opus-4`, `opus`, `opus-4`, `opus-4-6` | `opus` | `claude-opus-4-6` |
-| `claude-sonnet-4-6`, `claude-sonnet-4`, `sonnet`, `sonnet-4`, `sonnet-4-6` | `sonnet` | `claude-sonnet-4-6` |
-| `claude-haiku-4-5`, `claude-haiku-4`, `haiku`, `haiku-4`, `haiku-4-5` | `haiku` | `claude-haiku-4-5` |
+| `opus`, `claude-opus-4-6`, `claude-opus-4-7`, `opus-5` | `opus` | `claude-opus-4-6` |
+| `sonnet`, `claude-sonnet-4-6`, `sonnet-4-7` | `sonnet` | `claude-sonnet-4-6` |
+| `haiku`, `claude-haiku-4-5`, `haiku-5` | `haiku` | `claude-haiku-4-5` |
 
-Model names with the `claude-code-cli/` or `openai/` prefix are also accepted (the prefix is stripped before lookup). Unknown models fall back to `DEFAULT_MODEL`.
+Model names with the `claude-code-cli/` or `openai/` prefix are also accepted (the prefix is stripped before lookup). Unknown model families return HTTP 400 instead of falling back to `DEFAULT_MODEL`.
 
 ## Effort Levels
 
@@ -270,6 +270,55 @@ Types are defined in `src/protocol/cli-types.ts`.
 
 Errors are formatted as Anthropic `{type:"error",error:{type,message}}` for `/v1/messages` and OpenAI `{error:{message,type,code}}` for `/v1/chat/completions`.
 
+## Rate Limit Response Headers
+
+The proxy forwards quota information from the CLI's `rate_limit_event` as standard HTTP response headers. These values originate from Anthropic's own `anthropic-ratelimit-*` headers, which the CLI surfaces in its NDJSON event stream.
+
+| Header | Type | Format | Description |
+|---|---|---|---|
+| `x-ratelimit-limit` | Integer | e.g. `1000` | Maximum requests (or tokens) allowed in the current rate limit window |
+| `x-ratelimit-remaining` | Integer | e.g. `999` | Quota units remaining in the current window. Token values are rounded to the nearest thousand by Anthropic |
+| `x-ratelimit-reset` | String | RFC 3339 timestamp, e.g. `2026-03-19T15:30:00Z` | When the current rate limit window fully replenishes |
+
+**Availability:**
+- **Non-streaming responses** (200 OK): all three headers are set when the CLI provides rate limit info.
+- **Streaming responses** (SSE): headers cannot be set after the stream starts. On a rate-limit error during streaming, `reset_at` is included in the SSE error event body instead.
+- **429 errors**: `x-ratelimit-reset` is always set. `x-ratelimit-limit` and `x-ratelimit-remaining` are set if the CLI provides them in the `rate_limit_event`.
+
+All three headers are listed in `Access-Control-Expose-Headers` so browser clients can read them.
+
+## Usage Object — Cache Token Fields
+
+Both API surfaces forward Anthropic's `cache_creation_input_tokens` and `cache_read_input_tokens` from the CLI's `Usage` payload. Cold-cache requests report `0` rather than dropping the field, so the response shape is consistent on every call.
+
+**Anthropic `/v1/messages`** — fields land directly on `usage`:
+```json
+{
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 50,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 8
+  }
+}
+```
+
+**OpenAI `/v1/chat/completions`** — `cache_read_input_tokens` is mirrored to the OpenAI-spec `prompt_tokens_details.cached_tokens`. The Anthropic-style keys are also surfaced so clients that grok them keep cache-creation visibility (OpenAI has no native field for cache-write tokens):
+```json
+{
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 50,
+    "total_tokens": 60,
+    "prompt_tokens_details": { "cached_tokens": 8 },
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 8
+  }
+}
+```
+
+This shape is identical on both the non-streaming response and the final streaming chunk emitted when `stream_options.include_usage: true`.
+
 ## Unsupported Parameters
 
 These are accepted but ignored (a `x-proxy-unsupported` response header lists them):
@@ -277,6 +326,10 @@ These are accepted but ignored (a `x-proxy-unsupported` response header lists th
 - `stop_sequences` / `stop` — no CLI equivalent
 - `frequency_penalty`, `presence_penalty` — OpenAI-specific, no equivalent
 - `n > 1` — only single completion supported
+
+## OpenAI Streaming Options
+
+`POST /v1/chat/completions` honors `stream_options.include_usage`. When `stream: true` and `stream_options: {include_usage: true}` are both set, the proxy emits one extra chunk with empty `choices` and a populated `usage` object immediately before `data: [DONE]`. Usage is suppressed only on rate-limit errors, where the SSE error event already terminates the stream. Only `include_usage` is honored — other fields under `stream_options` are ignored.
 
 ## OpenClaw Integration
 
