@@ -87,21 +87,28 @@ export function mapToolDefinitions(
     return { ...tool, name: mapped };
   });
 
-  // Subagent hallucination guard (2026-06-03). The model has a strong prior to call
-  // its native subagent tools "Agent"/"Task" REGARDLESS of what the client names its
-  // spawner (OpenClaw's main agent calls it "sessions_spawn"). When it does, OpenClaw
-  // rejects "Tool Agent not found" and retries — a wasteful loop. So map those
-  // hallucinated names onto whichever subagent-like tool the request actually provides.
-  // Schema-discovering (works for any spawner name); only adds an alias if that name
-  // isn't already a real/mapped tool, so correct sessions_spawn calls are untouched.
-  const SUBAGENT_RE = /^(sessions_spawn|spawn|subagent|agent|task|run_agent|delegate)$/i;
-  const spawner = tools.find(t => SUBAGENT_RE.test(t.name));
-  if (spawner) {
-    for (const alias of ['Agent', 'Task']) {
-      if (!(alias in reverseToolMap) && !seenNames.has(alias)) {
-        reverseToolMap[alias] = spawner.name;
-      }
-    }
+  // Native-name hallucination guard (2026-06-03). The model has strong priors to call
+  // its Claude Code native tools ("Skill", "Agent"/"Task", "TodoWrite", "WebFetch"...)
+  // REGARDLESS of what OpenClaw names them ("skills", "sessions_spawn", "update_plan",
+  // "web_fetch"...). Each wrong guess costs a wasted round ("Tool X not found" -> retry),
+  // so Pepper would cycle through several names before landing the right one. Map each
+  // well-known native name onto whichever matching tool the request ACTUALLY provides —
+  // schema-discovering, and only when a target is present, so real calls are untouched.
+  const NATIVE_ALIASES: Array<[string, RegExp]> = [
+    ['Agent',     /^(sessions_spawn|spawn|subagents?|run_agent|delegate)$/i],
+    ['Task',      /^(sessions_spawn|spawn|subagents?|run_agent|delegate)$/i],
+    ['Skill',     /^(skills?|run_skill|invoke_skill|use_skill)$/i],
+    ['TodoWrite', /^(update_plan|todo_write|todos?|plan)$/i],
+    ['WebFetch',  /^(web_fetch|fetch_url|fetch)$/i],
+    ['WebSearch', /^(web_search|x_search|search_web)$/i],
+    ['Bash',      /^(exec|bash|shell|run_command)$/i],
+    ['Glob',      /^(glob|find_files|list_files)$/i],
+    ['Grep',      /^(grep|ripgrep|search_files|search_code)$/i],
+  ];
+  for (const [native, re] of NATIVE_ALIASES) {
+    if (native in reverseToolMap || seenNames.has(native)) continue; // already mapped / a real tool
+    const target = tools.find(t => re.test(t.name));
+    if (target) reverseToolMap[native] = target.name;
   }
 
   return { mappedTools, reverseToolMap };
