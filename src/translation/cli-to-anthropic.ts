@@ -128,7 +128,7 @@ export async function collectAnthropicResponse(
       }
 
       case 'rate_limit_event': {
-        if (event.rate_limit_info.status !== 'allowed') {
+        if (event.rate_limit_info.status !== 'allowed' && event.rate_limit_info.status !== 'allowed_warning') {
           throw rateLimited(
             event.rate_limit_info.message || 'Rate limit exceeded',
             event.rate_limit_info.reset,

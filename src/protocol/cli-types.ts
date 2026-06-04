@@ -164,7 +164,7 @@ export interface CliStreamEvent {
 export interface CliRateLimitEvent {
   type: 'rate_limit_event';
   rate_limit_info: {
-    status: 'allowed' | 'rate_limited';
+    status: 'allowed' | 'allowed_warning' | 'rate_limited';
     limit?: number;
     remaining?: number;
     reset?: string;
