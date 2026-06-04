@@ -4,6 +4,8 @@ import { badRequest } from '../util/errors.js';
 import { buildMcpConfig } from '../tools/tool-translator.js';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 
 /**
  * Extract system prompt from the request.
@@ -17,14 +19,47 @@ function extractSystemPrompt(system: AnthropicMessagesRequest['system']): string
 }
 
 /**
+ * Check if any message in the array contains image content blocks.
+ */
+function messagesHaveImages(messages: AnthropicMessage[]): boolean {
+  for (const msg of messages) {
+    if (typeof msg.content === 'string') continue;
+    for (const block of msg.content) {
+      if (block.type === 'image') return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Format messages as newline-delimited JSON for --input-format stream-json.
+ * The Claude CLI stream-json input format expects:
+ *   {"type":"user","message":{"role":"user","content":[...]}}
+ * Each message is a separate JSON object on its own line.
+ */
+function messagesToStreamJsonPrompt(messages: AnthropicMessage[]): string {
+  return messages.map(msg => JSON.stringify({ type: msg.role, message: msg })).join('\n') + '\n';
+}
+
+/**
  * Convert a single content block to text representation for the prompt.
+ * Falls back to saving images as temp files if stream-json is not used.
  */
 function contentBlockToText(block: AnthropicContentBlock): string {
   switch (block.type) {
     case 'text':
       return block.text;
-    case 'image':
-      return '[Image content]';
+    case 'image': {
+      // Save image to temp file so it's not completely lost in text mode
+      try {
+        const ext = block.source.media_type.split('/')[1] ?? 'jpg';
+        const tmpPath = `/tmp/claude-proxy-img-${randomUUID()}.${ext}`;
+        writeFileSync(tmpPath, Buffer.from(block.source.data, 'base64'));
+        return `[Image saved to: ${tmpPath}]`;
+      } catch {
+        return '[Image content - could not save to temp file]';
+      }
+    }
     case 'tool_use':
       return `<tool_call id="${block.id}" name="${block.name}">\n${JSON.stringify(block.input, null, 2)}\n</tool_call>`;
     case 'tool_result': {
@@ -110,14 +145,21 @@ export function translateAnthropicRequest(request: AnthropicMessagesRequest): Cl
     mcpConfig = config as unknown as Record<string, unknown>;
   }
 
+  // Use stream-json input format when images are present (native vision support)
+  const hasImages = messagesHaveImages(request.messages);
+  const prompt = hasImages
+    ? messagesToStreamJsonPrompt(request.messages)
+    : messagesToPrompt(request.messages);
+
   return {
     model: request.model,
-    prompt: messagesToPrompt(request.messages),
+    prompt,
     systemPrompt: extractSystemPrompt(request.system),
     effort: request.metadata?.effort,
     jsonSchema: request.metadata?.json_schema,
     mcpConfig,
     mcpServerNames: request.metadata?.mcp_servers,
     enableThinking: false, // Will be set by the route handler based on config/headers
+    hasImages,
   };
 }
