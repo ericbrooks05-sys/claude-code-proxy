@@ -36,9 +36,9 @@ export function createServer(config: Config): Server {
       // Route dispatch
       if (method === 'POST' && path === '/v1/messages') {
         await handleMessages(req, res, config);
-      } else if (method === 'POST' && path === '/v1/chat/completions') {
+      } else if (method === 'POST' && (path === '/v1/chat/completions' || path === '/chat/completions')) {
         await handleChatCompletions(req, res, config);
-      } else if (method === 'GET' && path === '/v1/models') {
+      } else if (method === 'GET' && (path === '/v1/models' || path === '/models')) {
         handleModels(req, res);
       } else if (method === 'GET' && path === '/health') {
         handleHealth(req, res);
