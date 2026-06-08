@@ -40,17 +40,75 @@ const CLAUDE_PARAM_TO_OPENCLAW: Record<string, string> = {
 };
 
 /**
- * Translate a response tool_use input object's parameter keys from Claude-native
- * names back to the names the OpenClaw client expects. Safe to call on any input:
- * only known aliased keys are renamed; everything else passes through untouched.
+ * Per-tool input SHAPE transforms (distinct from the param-KEY rename above).
+ *
+ * The model emits Claude-Code-native tool *shapes* regardless of the OpenClaw
+ * schema we send — the same training-prior root cause as the name/param-key
+ * issues. Two shapes leak through and fail OpenClaw's tool-layer validation:
+ *   - Edit:        {file_path, old_string, new_string} -> OpenClaw wants {path, edits:[{...}]}
+ *                  ("edits: must have required properties edits")
+ *   - spawn/Agent: {prompt, ...}                        -> OpenClaw wants {task, ...}
+ *                  ("task: must have required properties task")
+ *
+ * Each transform is matched by the RESOLVED OpenClaw tool name (the reverse-mapped
+ * name the client actually uses), runs AFTER the generic param-key rename, and is
+ * idempotent (a no-op on already-correct input). Table-driven so the next shape
+ * (BUG 4, 5, ...) is one row, not another branch.
+ *
+ * Schema note (2026-06-08): the edit element keys `old_string`/`new_string` are
+ * confirmed snake_case in the installed OpenClaw bundle, and the model already
+ * emits those same snake keys — so the transform only WRAPS them into `edits[]`
+ * (no inner rename), which is correct as long as OpenClaw's element stays
+ * snake_case. `replace_all` is passed through if present (assumed snake_case by
+ * consistency — verify against a live OpenClaw `edit` schema if it ever changes).
  */
-export function remapToolInput(input: unknown): unknown {
+type ToolInputTransform = (input: Record<string, unknown>) => Record<string, unknown>;
+
+/** Edit: wrap a single Claude-native {old_string,new_string,replace_all?} into OpenClaw's edits[]. */
+function reshapeEditInput(input: Record<string, unknown>): Record<string, unknown> {
+  if ('edits' in input) return input; // already OpenClaw shape — idempotent
+  if (!('old_string' in input) && !('new_string' in input)) return input; // not the single-edit shape
+  const { old_string, new_string, replace_all, ...rest } = input;
+  const edit: Record<string, unknown> = {};
+  if (old_string !== undefined) edit.old_string = old_string;
+  if (new_string !== undefined) edit.new_string = new_string;
+  if (replace_all !== undefined) edit.replace_all = replace_all;
+  return { ...rest, edits: [edit] }; // `path` already renamed from file_path by the time we get here
+}
+
+/** spawn/Agent: model emits `prompt`; OpenClaw wants `task`. Rename only if `task` absent. */
+function reshapeSpawnInput(input: Record<string, unknown>): Record<string, unknown> {
+  if ('task' in input || !('prompt' in input)) return input; // idempotent / nothing to do
+  const { prompt, ...rest } = input;
+  return { ...rest, task: prompt };
+}
+
+// Matched against the RESOLVED OpenClaw tool name. The spawn pattern mirrors the
+// NATIVE_ALIASES spawn regex below so it covers whatever the request names the agent tool.
+const TOOL_INPUT_TRANSFORMS: Array<{ match: RegExp; transform: ToolInputTransform }> = [
+  { match: /^edit$/i, transform: reshapeEditInput },
+  { match: /^(sessions_spawn|spawn|subagents?|run_agent|delegate)$/i, transform: reshapeSpawnInput },
+];
+
+/**
+ * Translate a response tool_use input back to the shape the OpenClaw client expects.
+ *   1. Rename Claude-native param KEYS (file_path -> path) — applies to every tool.
+ *   2. If `openclawToolName` matches a per-tool transform, reshape the input STRUCTURE.
+ * Safe on any input: unknown tools / already-correct shapes pass through untouched.
+ * `openclawToolName` is optional so callers without a resolved name keep rename-only behavior.
+ */
+export function remapToolInput(input: unknown, openclawToolName?: string): unknown {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
-  const out: Record<string, unknown> = {};
+  const renamed: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
-    out[CLAUDE_PARAM_TO_OPENCLAW[k] ?? k] = v;
+    renamed[CLAUDE_PARAM_TO_OPENCLAW[k] ?? k] = v;
   }
-  return out;
+  if (openclawToolName) {
+    for (const { match, transform } of TOOL_INPUT_TRANSFORMS) {
+      if (match.test(openclawToolName)) return transform(renamed);
+    }
+  }
+  return renamed;
 }
 
 /**

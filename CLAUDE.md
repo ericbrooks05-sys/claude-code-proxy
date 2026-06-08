@@ -351,6 +351,15 @@ Client tool names are mapped to Claude Code equivalents for better model perform
 
 Tool names are mapped forward in requests and reverse-mapped in responses so clients see their original names.
 
+### Tool Input Shape Mapping
+The model emits Claude-Code-native tool *input shapes* regardless of the OpenClaw schema sent, so on the response side `remapToolInput(input, openclawToolName?)` (in `src/openclaw/tool-map.ts`) reshapes them back. Two layers:
+1. **Param-key rename** (all tools): `file_path` → `path`.
+2. **Per-tool shape transforms** (matched by resolved OpenClaw tool name, table-driven via `TOOL_INPUT_TRANSFORMS`, idempotent):
+   - **`edit`**: `{old_string, new_string, replace_all?}` → `{path, edits:[{old_string, new_string, replace_all?}]}` (wraps the single edit into the `edits[]` array OpenClaw requires).
+   - **spawn/agent** (`sessions_spawn`/`spawn`/`subagents`/`run_agent`/`delegate`): `prompt` → `task`.
+
+Already-correct input passes through untouched. The resolved OpenClaw tool name is threaded in from the response translators (`cli-to-openai.ts`, `cli-to-openai-stream.ts`) where the tool name is already reverse-mapped. Streaming buffers each tool's args to completion before the transform runs, so structural reshapes are safe.
+
 ### System Prompt Filtering
 XML-tagged tooling sections injected by coding agents (e.g. `<tools>`, `<skills>`, `<functions>`) are auto-detected and stripped from system prompts to prevent conflicts with the CLI's MCP-based tool system.
 
