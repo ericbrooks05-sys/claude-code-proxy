@@ -2,23 +2,27 @@
  * Unit tests for remapToolInput's tool-aware shape transforms (BUGS 1 & 2).
  * Uses Node's built-in test runner (no new deps). Run after build:
  *   node --test dist/openclaw/tool-map.test.js
+ *
+ * Schema target (2026-06-08, OpenClaw 2026.6.1): edit element = {oldText, newText}
+ * camelCase, additionalProperties:false, no replace_all. Confirmed against the
+ * installed bundle + a live `edit` probe that rejected snake_case.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { remapToolInput } from './tool-map.js';
 
-test('edit: Claude-native {file_path, old_string, new_string} wraps into OpenClaw {path, edits[]}', () => {
+test('edit: Claude-native {file_path, old_string, new_string} wraps into OpenClaw {path, edits[{oldText,newText}]}', () => {
   const out = remapToolInput({ file_path: '/a.txt', old_string: 'x', new_string: 'y' }, 'edit');
-  assert.deepEqual(out, { path: '/a.txt', edits: [{ old_string: 'x', new_string: 'y' }] });
+  assert.deepEqual(out, { path: '/a.txt', edits: [{ oldText: 'x', newText: 'y' }] });
 });
 
-test('edit: replace_all is carried into the edit element', () => {
+test('edit: replace_all is DROPPED (not in OpenClaw 6.1 schema, additionalProperties:false)', () => {
   const out = remapToolInput({ file_path: '/a.txt', old_string: 'x', new_string: 'y', replace_all: true }, 'edit');
-  assert.deepEqual(out, { path: '/a.txt', edits: [{ old_string: 'x', new_string: 'y', replace_all: true }] });
+  assert.deepEqual(out, { path: '/a.txt', edits: [{ oldText: 'x', newText: 'y' }] });
 });
 
 test('edit: already-correct {path, edits[]} passes through unchanged (idempotent)', () => {
-  const input = { path: '/a.txt', edits: [{ old_string: 'x', new_string: 'y' }] };
+  const input = { path: '/a.txt', edits: [{ oldText: 'x', newText: 'y' }] };
   const out = remapToolInput(structuredClone(input), 'edit');
   assert.deepEqual(out, input);
 });

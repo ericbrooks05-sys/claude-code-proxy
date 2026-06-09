@@ -45,7 +45,7 @@ const CLAUDE_PARAM_TO_OPENCLAW: Record<string, string> = {
  * The model emits Claude-Code-native tool *shapes* regardless of the OpenClaw
  * schema we send — the same training-prior root cause as the name/param-key
  * issues. Two shapes leak through and fail OpenClaw's tool-layer validation:
- *   - Edit:        {file_path, old_string, new_string} -> OpenClaw wants {path, edits:[{...}]}
+ *   - Edit:        {file_path, old_string, new_string} -> OpenClaw 6.1 wants {path, edits:[{oldText,newText}]}
  *                  ("edits: must have required properties edits")
  *   - spawn/Agent: {prompt, ...}                        -> OpenClaw wants {task, ...}
  *                  ("task: must have required properties task")
@@ -55,12 +55,12 @@ const CLAUDE_PARAM_TO_OPENCLAW: Record<string, string> = {
  * idempotent (a no-op on already-correct input). Table-driven so the next shape
  * (BUG 4, 5, ...) is one row, not another branch.
  *
- * Schema note (2026-06-08): the edit element keys `old_string`/`new_string` are
- * confirmed snake_case in the installed OpenClaw bundle, and the model already
- * emits those same snake keys — so the transform only WRAPS them into `edits[]`
- * (no inner rename), which is correct as long as OpenClaw's element stays
- * snake_case. `replace_all` is passed through if present (assumed snake_case by
- * consistency — verify against a live OpenClaw `edit` schema if it ever changes).
+ * Schema note (2026-06-08, OpenClaw 2026.6.1): the edit element schema is
+ * `{oldText, newText}` (camelCase) with additionalProperties:false — confirmed in the
+ * installed bundle (sessions-*.js replaceEditSchema) AND by a live `edit` probe that
+ * rejected snake_case. The model emits Claude-native snake keys, so the transform
+ * RENAMES old_string->oldText / new_string->newText and DROPS replace_all (not in the
+ * 6.1 schema). Earlier 5.x assumed snake element keys; 6.1 moved that goalpost.
  */
 type ToolInputTransform = (input: Record<string, unknown>) => Record<string, unknown>;
 
@@ -69,10 +69,14 @@ function reshapeEditInput(input: Record<string, unknown>): Record<string, unknow
   if ('edits' in input) return input; // already OpenClaw shape — idempotent
   if (!('old_string' in input) && !('new_string' in input)) return input; // not the single-edit shape
   const { old_string, new_string, replace_all, ...rest } = input;
+  // OpenClaw 2026.6.1 edit element schema = {oldText, newText}, additionalProperties:false.
+  // The model emits Claude-native snake keys (old_string/new_string) — rename to camelCase.
+  // replace_all is intentionally DROPPED: 6.1's replaceEditSchema forbids extra props and
+  // requires oldText to be unique, so there is no replace_all concept to forward.
+  void replace_all;
   const edit: Record<string, unknown> = {};
-  if (old_string !== undefined) edit.old_string = old_string;
-  if (new_string !== undefined) edit.new_string = new_string;
-  if (replace_all !== undefined) edit.replace_all = replace_all;
+  if (old_string !== undefined) edit.oldText = old_string;
+  if (new_string !== undefined) edit.newText = new_string;
   return { ...rest, edits: [edit] }; // `path` already renamed from file_path by the time we get here
 }
 
