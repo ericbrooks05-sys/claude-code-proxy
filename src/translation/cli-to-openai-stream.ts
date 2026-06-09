@@ -5,11 +5,16 @@ import { stripMcpToolPrefix } from '../tools/tool-translator.js';
 import { parseAnyToolCallText } from './function-call-text-parser.js';
 import { remapToolInput } from '../openclaw/tool-map.js';
 
-/** Reverse-map Claude-native param keys (e.g. file_path) to OpenClaw's (path) in an args JSON string. */
-function remapArgsJson(argsJson: string): string {
+/**
+ * Reverse-map a response tool_use args JSON string to the OpenClaw shape:
+ * param-key rename (file_path -> path) plus, when `toolName` (the resolved OpenClaw
+ * tool name) is given, the per-tool shape transform (Edit -> edits[], spawn -> task).
+ * Args are buffered to completion before this runs, so structural reshapes are safe.
+ */
+function remapArgsJson(argsJson: string, toolName?: string): string {
   if (!argsJson) return argsJson;
   try {
-    return JSON.stringify(remapToolInput(JSON.parse(argsJson)));
+    return JSON.stringify(remapToolInput(JSON.parse(argsJson), toolName));
   } catch {
     return argsJson;
   }
@@ -71,6 +76,7 @@ export async function* cliToOpenAISSE(
   // Claude-native param keys (file_path -> path) before emitting. Renaming can't be
   // done on partial JSON fragments, so we hold the args and flush them at block stop.
   let pendingToolArgs: string | null = null;
+  let pendingToolName: string | null = null; // resolved OpenClaw tool name for the current tool_use block (for the args shape transform)
   // Buffer assistant text so we can detect <function_calls> XML that the CLI
   // sometimes emits as text instead of native tool_use, and convert it.
   let textBuffer = '';
@@ -126,12 +132,13 @@ export async function* cliToOpenAISSE(
         if (block.type === 'tool_use') {
           toolCallIndex++;
           pendingToolArgs = ''; // start buffering this block's input JSON
+          pendingToolName = stripMcpToolPrefix(block.name, reverseToolMap); // resolved OpenClaw name, used by the args reshape at flush
           const chunk = makeChunk(messageId, model, {
             tool_calls: [{
               index: toolCallIndex,
               id: block.id,
               type: 'function',
-              function: { name: stripMcpToolPrefix(block.name, reverseToolMap), arguments: '' },
+              function: { name: pendingToolName, arguments: '' },
             }],
           }, null);
           yield `data: ${JSON.stringify(chunk)}\n\n`;
@@ -163,7 +170,7 @@ export async function* cliToOpenAISSE(
         // Safety net: flush any tool args not yet closed by a content_block_stop.
         if (pendingToolArgs !== null) {
           yield `data: ${JSON.stringify(makeChunk(messageId, model, {
-            tool_calls: [{ index: toolCallIndex, function: { arguments: remapArgsJson(pendingToolArgs) } }],
+            tool_calls: [{ index: toolCallIndex, function: { arguments: remapArgsJson(pendingToolArgs, pendingToolName ?? undefined) } }],
           }, null))}\n\n`;
           pendingToolArgs = null;
         }
@@ -185,7 +192,7 @@ export async function* cliToOpenAISSE(
             for (const tc of parsed.toolCalls) {
               _diag.toolChunks++;
               yield `data: ${JSON.stringify(makeChunk(messageId, model, {
-                tool_calls: [{ index: ti, id: tc.id, type: 'function', function: { name: tc.name, arguments: remapArgsJson(tc.argsJson) } }],
+                tool_calls: [{ index: ti, id: tc.id, type: 'function', function: { name: tc.name, arguments: remapArgsJson(tc.argsJson, tc.name) } }],
               }, null))}\n\n`;
               ti++;
             }
@@ -233,7 +240,7 @@ export async function* cliToOpenAISSE(
         // Flush the buffered tool args with param keys remapped (file_path -> path).
         if (pendingToolArgs !== null) {
           yield `data: ${JSON.stringify(makeChunk(messageId, model, {
-            tool_calls: [{ index: toolCallIndex, function: { arguments: remapArgsJson(pendingToolArgs) } }],
+            tool_calls: [{ index: toolCallIndex, function: { arguments: remapArgsJson(pendingToolArgs, pendingToolName ?? undefined) } }],
           }, null))}\n\n`;
           pendingToolArgs = null;
         }

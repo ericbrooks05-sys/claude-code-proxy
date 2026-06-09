@@ -6,11 +6,15 @@ import { stripMcpToolPrefix } from '../tools/tool-translator.js';
 import { parseAnyToolCallText } from './function-call-text-parser.js';
 import { remapToolInput } from '../openclaw/tool-map.js';
 
-/** Reverse-map Claude-native param keys (e.g. file_path) to OpenClaw's (path) in an args JSON string. */
-function remapArgsJson(argsJson: string): string {
+/**
+ * Reverse-map a response tool_use args JSON string to the OpenClaw shape:
+ * param-key rename (file_path -> path) plus, when `toolName` (the resolved OpenClaw
+ * tool name) is given, the per-tool shape transform (Edit -> edits[], spawn -> task).
+ */
+function remapArgsJson(argsJson: string, toolName?: string): string {
   if (!argsJson) return argsJson;
   try {
-    return JSON.stringify(remapToolInput(JSON.parse(argsJson)));
+    return JSON.stringify(remapToolInput(JSON.parse(argsJson), toolName));
   } catch {
     return argsJson; // partial/invalid JSON — leave untouched
   }
@@ -202,7 +206,7 @@ export async function collectOpenAIResponse(
           type: 'function' as const,
           function: {
             name: tc.name,
-            arguments: remapArgsJson(tc.partialJson),
+            arguments: remapArgsJson(tc.partialJson, tc.name),
           },
         }))
       : undefined;
